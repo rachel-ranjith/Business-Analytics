@@ -1,335 +1,421 @@
+"""
+Bank Marketing Analytics: Term Deposit Subscription Prediction
+Focused analysis of housing loans, personal loans, and balance impact
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier, plot_tree
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
-from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier, plot_tree
+from sklearn.metrics import (confusion_matrix, roc_curve, auc, 
+                             precision_recall_curve, average_precision_score,
+                             accuracy_score, f1_score, precision_score, recall_score)
+from imblearn.over_sampling import SMOTE
 import warnings
 warnings.filterwarnings('ignore')
 
-# Set style for better-looking plots
-sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (12, 6)
-plt.rcParams['font.size'] = 10
+# Color palette - dusky blues and greens
+COLORS = {
+    'dark_blue': '#2C5F7C',
+    'medium_blue': '#4A8DAB', 
+    'light_blue': '#6BAED6',
+    'dark_green': '#2D5A4A',
+    'medium_green': '#4A8B7C',
+    'light_green': '#7BC9B5',
+    'slate': '#5C7080',
+    'muted_teal': '#3D7A7A'
+}
 
-# Load the data
+# Load and prepare data
 df = pd.read_excel('Bank Marketing Data.xlsx')
+df['y_encoded'] = (df['y'] == 'yes').astype(int)
+df['housing_encoded'] = (df['housing'] == 'yes').astype(int)
+df['loan_encoded'] = (df['loan'] == 'yes').astype(int)
 
-print("="*80)
-print("BANK MARKETING CAMPAIGN ANALYSIS")
-print("Focus: Impact of Loans and Balance on Term Deposit Subscription")
-print("="*80)
-print(f"\nDataset Shape: {df.shape}")
-print(f"Target Variable Distribution:")
-print(df['y'].value_counts())
-print(f"\nSubscription Rate: {(df['y']=='yes').sum()/len(df)*100:.2f}%")
+def categorize_loans(row):
+    if row['housing'] == 'yes' and row['loan'] == 'yes':
+        return 'Both Loans'
+    elif row['housing'] == 'yes':
+        return 'Housing Only'
+    elif row['loan'] == 'yes':
+        return 'Personal Only'
+    else:
+        return 'No Loans'
 
-# Create loan categories
-df['loan_category'] = 'None'
-df.loc[(df['housing']=='yes') & (df['loan']=='no'), 'loan_category'] = 'Housing Only'
-df.loc[(df['housing']=='no') & (df['loan']=='yes'), 'loan_category'] = 'Personal Only'
-df.loc[(df['housing']=='yes') & (df['loan']=='yes'), 'loan_category'] = 'Both Loans'
+df['loan_status'] = df.apply(categorize_loans, axis=1)
 
-# Balance categories for clearer analysis
 df['balance_category'] = pd.cut(df['balance'], 
-                                 bins=[-np.inf, 0, 500, 2000, np.inf],
-                                 labels=['Negative/Zero', 'Low (1-500)', 'Medium (501-2000)', 'High (>2000)'])
+                                 bins=[-float('inf'), 0, 500, 1500, 5000, float('inf')],
+                                 labels=['Negative', 'Low\n(€0-500)', 'Medium\n(€500-1.5K)', 
+                                        'High\n(€1.5K-5K)', 'Very High\n(€5K+)'])
 
-print("\n" + "="*80)
-print("EXPLORATORY DATA ANALYSIS")
-print("="*80)
+# Encode features
+le_dict = {}
+for col in ['job', 'marital', 'education', 'contact', 'month', 'poutcome']:
+    le_dict[col] = LabelEncoder()
+    df[f'{col}_encoded'] = le_dict[col].fit_transform(df[col])
 
-# Subscription rates by loan category
-print("\n1. SUBSCRIPTION RATES BY LOAN CATEGORY:")
-print("-" * 50)
-loan_sub = df.groupby('loan_category')['y'].apply(lambda x: (x=='yes').sum()/len(x)*100)
-for cat, rate in loan_sub.items():
-    count = len(df[df['loan_category']==cat])
-    print(f"  {cat:20s}: {rate:6.2f}% (n={count})")
+feature_cols = ['age', 'balance', 'duration', 'campaign', 'pdays', 'previous',
+                'housing_encoded', 'loan_encoded', 'job_encoded', 'marital_encoded', 
+                'education_encoded', 'contact_encoded', 'month_encoded', 'poutcome_encoded']
 
-# Subscription rates by balance category
-print("\n2. SUBSCRIPTION RATES BY BALANCE CATEGORY:")
-print("-" * 50)
-balance_sub = df.groupby('balance_category')['y'].apply(lambda x: (x=='yes').sum()/len(x)*100)
-for cat, rate in balance_sub.items():
-    count = len(df[df['balance_category']==cat])
-    print(f"  {cat:20s}: {rate:6.2f}% (n={count})")
+X = df[feature_cols]
+y = df['y_encoded']
 
-# Average balance by subscription
-print("\n3. AVERAGE BALANCE BY SUBSCRIPTION STATUS:")
-print("-" * 50)
-print(f"  Subscribed (yes):    €{df[df['y']=='yes']['balance'].mean():,.2f}")
-print(f"  Not subscribed (no): €{df[df['y']=='no']['balance'].mean():,.2f}")
-print(f"  Difference:          €{df[df['y']=='yes']['balance'].mean() - df[df['y']=='no']['balance'].mean():,.2f}")
-
-# Prepare data for modeling
-df_model = df.copy()
-df_model['y_binary'] = (df_model['y'] == 'yes').astype(int)
-df_model['housing_binary'] = (df_model['housing'] == 'yes').astype(int)
-df_model['loan_binary'] = (df_model['loan'] == 'yes').astype(int)
-
-# Features for modeling
-X = df_model[['housing_binary', 'loan_binary', 'balance']]
-y = df_model['y_binary']
-
-# Split data
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
 
-# Scale features for logistic regression
+smote = SMOTE(random_state=42)
+X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
+
 scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
+X_train_scaled = scaler.fit_transform(X_train_smote)
 X_test_scaled = scaler.transform(X_test)
 
-print("\n" + "="*80)
-print("MODEL 1: LOGISTIC REGRESSION")
-print("="*80)
+# Train models
+models = {
+    'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+    'Random Forest': RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42),
+    'Decision Tree': DecisionTreeClassifier(max_depth=8, random_state=42)
+}
 
-# Logistic Regression
-log_reg = LogisticRegression(random_state=42, max_iter=1000)
-log_reg.fit(X_train_scaled, y_train)
+results = {}
+for name, model in models.items():
+    if name == 'Logistic Regression':
+        model.fit(X_train_scaled, y_train_smote)
+        y_pred = model.predict(X_test_scaled)
+        y_prob = model.predict_proba(X_test_scaled)[:, 1]
+    else:
+        model.fit(X_train_smote, y_train_smote)
+        y_pred = model.predict(X_test)
+        y_prob = model.predict_proba(X_test)[:, 1]
+    
+    results[name] = {
+        'model': model,
+        'y_pred': y_pred,
+        'y_prob': y_prob,
+        'accuracy': accuracy_score(y_test, y_pred),
+        'precision': precision_score(y_test, y_pred),
+        'recall': recall_score(y_test, y_pred),
+        'f1': f1_score(y_test, y_pred)
+    }
 
-print("\nCOEFFICIENTS (Standardized):")
-print("-" * 50)
-for feature, coef in zip(X.columns, log_reg.coef_[0]):
-    odds_ratio = np.exp(coef)
-    print(f"  {feature:20s}: {coef:8.4f} (Odds Ratio: {odds_ratio:.4f})")
-print(f"  {'Intercept':20s}: {log_reg.intercept_[0]:8.4f}")
+# -----------------------------------------------------------------------------
+# FIGURE 1: Subscription Rate by Loan Status
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(10, 6))
 
-print("\nINTERPRETATION:")
-print("-" * 50)
-print("  • Housing Loan:", "DECREASES" if log_reg.coef_[0][0] < 0 else "INCREASES", 
-      f"odds by {abs((np.exp(log_reg.coef_[0][0])-1)*100):.1f}%")
-print("  • Personal Loan:", "DECREASES" if log_reg.coef_[0][1] < 0 else "INCREASES", 
-      f"odds by {abs((np.exp(log_reg.coef_[0][1])-1)*100):.1f}%")
-print("  • Balance: For each €1000 increase,", "DECREASES" if log_reg.coef_[0][2] < 0 else "INCREASES", 
-      f"odds by {abs((np.exp(log_reg.coef_[0][2]*1000)-1)*100):.1f}%")
+loan_sub = df.groupby('loan_status')['y_encoded'].agg(['sum', 'count'])
+loan_sub['rate'] = loan_sub['sum'] / loan_sub['count'] * 100
+loan_order = ['No Loans', 'Housing Only', 'Personal Only', 'Both Loans']
+loan_sub = loan_sub.reindex(loan_order)
 
-y_pred_log = log_reg.predict(X_test_scaled)
-y_pred_proba_log = log_reg.predict_proba(X_test_scaled)[:, 1]
+bar_colors = [COLORS['dark_green'], COLORS['medium_green'], COLORS['medium_blue'], COLORS['dark_blue']]
+bars = ax.bar(loan_sub.index, loan_sub['rate'], color=bar_colors, edgecolor='white', linewidth=1.5)
 
-print("\nPERFORMANCE METRICS:")
-print("-" * 50)
-print(f"  Training Accuracy: {log_reg.score(X_train_scaled, y_train)*100:.2f}%")
-print(f"  Test Accuracy:     {log_reg.score(X_test_scaled, y_test)*100:.2f}%")
-print(f"  ROC-AUC Score:     {roc_auc_score(y_test, y_pred_proba_log):.4f}")
+for bar, rate, count in zip(bars, loan_sub['rate'], loan_sub['count']):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.4, 
+            f'{rate:.1f}%', ha='center', fontsize=14, fontweight='bold', color=COLORS['slate'])
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height()/2, 
+            f'n={count}', ha='center', fontsize=11, color='white', fontweight='bold')
 
-cv_scores = cross_val_score(log_reg, X_train_scaled, y_train, cv=5, scoring='roc_auc')
-print(f"  Cross-Val AUC:     {cv_scores.mean():.4f} (+/- {cv_scores.std()*2:.4f})")
+ax.set_ylabel('Subscription Rate (%)', fontsize=12, color=COLORS['slate'])
+ax.set_xlabel('')
+ax.set_title('Term Deposit Subscription Rate by Existing Loan Status', 
+             fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.set_ylim(0, max(loan_sub['rate']) * 1.2)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
 
-print("\n" + "="*80)
-print("MODEL 2: DECISION TREE")
-print("="*80)
+plt.tight_layout()
+plt.savefig('01_subscription_by_loan_status.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
 
-dt = DecisionTreeClassifier(max_depth=5, min_samples_split=100, random_state=42)
-dt.fit(X_train, y_train)
+# -----------------------------------------------------------------------------
+# FIGURE 2: Balance Comparison (Boxplot only - clean)
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(8, 6))
 
-print("\nFEATURE IMPORTANCES:")
-print("-" * 50)
-for feature, importance in zip(X.columns, dt.feature_importances_):
-    print(f"  {feature:20s}: {importance:.4f}")
+df_plot = df[df['balance'].between(-1000, 8000)].copy()
+df_plot['Subscribed'] = df_plot['y'].map({'no': 'No', 'yes': 'Yes'})
 
-y_pred_dt = dt.predict(X_test)
-y_pred_proba_dt = dt.predict_proba(X_test)[:, 1]
+bp = ax.boxplot([df_plot[df_plot['Subscribed'] == 'No']['balance'],
+                  df_plot[df_plot['Subscribed'] == 'Yes']['balance']],
+                 labels=['Did Not Subscribe', 'Subscribed'],
+                 patch_artist=True, widths=0.5)
 
-print("\nPERFORMANCE METRICS:")
-print("-" * 50)
-print(f"  Training Accuracy: {dt.score(X_train, y_train)*100:.2f}%")
-print(f"  Test Accuracy:     {dt.score(X_test, y_test)*100:.2f}%")
-print(f"  ROC-AUC Score:     {roc_auc_score(y_test, y_pred_proba_dt):.4f}")
+bp['boxes'][0].set_facecolor(COLORS['medium_blue'])
+bp['boxes'][1].set_facecolor(COLORS['dark_green'])
+for box in bp['boxes']:
+    box.set_alpha(0.8)
+for median in bp['medians']:
+    median.set_color('white')
+    median.set_linewidth(2)
 
-print("\n" + "="*80)
-print("MODEL 3: RANDOM FOREST")
-print("="*80)
+# Add mean markers
+means = [df_plot[df_plot['Subscribed'] == 'No']['balance'].mean(),
+         df_plot[df_plot['Subscribed'] == 'Yes']['balance'].mean()]
+ax.scatter([1, 2], means, color=COLORS['light_green'], s=100, zorder=5, marker='D', edgecolor='white', linewidth=1.5)
 
-rf = RandomForestClassifier(n_estimators=100, max_depth=10, min_samples_split=50, random_state=42)
-rf.fit(X_train, y_train)
+ax.set_ylabel('Account Balance (€)', fontsize=12, color=COLORS['slate'])
+ax.set_title('Account Balance: Subscribers vs Non-Subscribers', 
+             fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
 
-print("\nFEATURE IMPORTANCES:")
-print("-" * 50)
-for feature, importance in zip(X.columns, rf.feature_importances_):
-    print(f"  {feature:20s}: {importance:.4f}")
+# Legend for mean
+ax.plot([], [], 'D', color=COLORS['light_green'], markersize=8, label='Mean')
+ax.legend(loc='upper right', frameon=False)
 
-y_pred_rf = rf.predict(X_test)
-y_pred_proba_rf = rf.predict_proba(X_test)[:, 1]
+plt.tight_layout()
+plt.savefig('02_balance_comparison.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
 
-print("\nPERFORMANCE METRICS:")
-print("-" * 50)
-print(f"  Training Accuracy: {rf.score(X_train, y_train)*100:.2f}%")
-print(f"  Test Accuracy:     {rf.score(X_test, y_test)*100:.2f}%")
-print(f"  ROC-AUC Score:     {roc_auc_score(y_test, y_pred_proba_rf):.4f}")
+# -----------------------------------------------------------------------------
+# FIGURE 3: Subscription Rate by Balance Category
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(10, 6))
 
-cv_scores_rf = cross_val_score(rf, X_train, y_train, cv=5, scoring='roc_auc')
-print(f"  Cross-Val AUC:     {cv_scores_rf.mean():.4f} (+/- {cv_scores_rf.std()*2:.4f})")
+bal_sub = df.groupby('balance_category', observed=True)['y_encoded'].agg(['sum', 'count'])
+bal_sub['rate'] = bal_sub['sum'] / bal_sub['count'] * 100
 
-# VISUALIZATIONS
-print("\n" + "="*80)
-print("GENERATING VISUALIZATIONS...")
-print("="*80)
+gradient_colors = [COLORS['dark_blue'], COLORS['medium_blue'], COLORS['muted_teal'], 
+                   COLORS['medium_green'], COLORS['dark_green']]
 
-# Figure 1: Subscription rates by loan category
-fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+bars = ax.bar(range(len(bal_sub)), bal_sub['rate'], color=gradient_colors, 
+              edgecolor='white', linewidth=1.5)
+ax.set_xticks(range(len(bal_sub)))
+ax.set_xticklabels(bal_sub.index, fontsize=10)
 
-# Plot 1: Subscription rate by loan category
-loan_sub_df = df.groupby('loan_category')['y'].apply(lambda x: (x=='yes').sum()/len(x)*100).sort_values(ascending=False)
-colors = sns.color_palette("RdYlGn", len(loan_sub_df))
-axes[0, 0].barh(loan_sub_df.index, loan_sub_df.values, color=colors)
-axes[0, 0].set_xlabel('Subscription Rate (%)', fontsize=12, fontweight='bold')
-axes[0, 0].set_title('Term Deposit Subscription Rate by Loan Category', fontsize=14, fontweight='bold', pad=20)
-axes[0, 0].set_xlim(0, max(loan_sub_df.values) * 1.1)
-for i, v in enumerate(loan_sub_df.values):
-    axes[0, 0].text(v + 0.5, i, f'{v:.2f}%', va='center', fontweight='bold')
+for bar, rate, count in zip(bars, bal_sub['rate'], bal_sub['count']):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3, 
+            f'{rate:.1f}%', ha='center', fontsize=12, fontweight='bold', color=COLORS['slate'])
 
-# Plot 2: Subscription rate by balance category
-balance_sub_df = df.groupby('balance_category')['y'].apply(lambda x: (x=='yes').sum()/len(x)*100)
-axes[0, 1].bar(range(len(balance_sub_df)), balance_sub_df.values, color=sns.color_palette("viridis", len(balance_sub_df)))
-axes[0, 1].set_xticks(range(len(balance_sub_df)))
-axes[0, 1].set_xticklabels(balance_sub_df.index, rotation=45, ha='right')
-axes[0, 1].set_ylabel('Subscription Rate (%)', fontsize=12, fontweight='bold')
-axes[0, 1].set_title('Term Deposit Subscription Rate by Balance Category', fontsize=14, fontweight='bold', pad=20)
-for i, v in enumerate(balance_sub_df.values):
-    axes[0, 1].text(i, v + 0.5, f'{v:.2f}%', ha='center', fontweight='bold')
+ax.set_ylabel('Subscription Rate (%)', fontsize=12, color=COLORS['slate'])
+ax.set_xlabel('Account Balance Category', fontsize=12, color=COLORS['slate'])
+ax.set_title('Higher Balance = Higher Subscription Likelihood', 
+             fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
 
-# Plot 3: Balance distribution by subscription
-axes[1, 0].violinplot([df[df['y']=='no']['balance'], df[df['y']=='yes']['balance']], 
-                       positions=[0, 1], showmeans=True, showmedians=True)
-axes[1, 0].set_xticks([0, 1])
-axes[1, 0].set_xticklabels(['Not Subscribed', 'Subscribed'])
-axes[1, 0].set_ylabel('Balance (€)', fontsize=12, fontweight='bold')
-axes[1, 0].set_title('Balance Distribution by Subscription Status', fontsize=14, fontweight='bold', pad=20)
-axes[1, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5, label='Zero Balance')
-axes[1, 0].legend()
+plt.tight_layout()
+plt.savefig('03_subscription_by_balance.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
 
-# Plot 4: Feature importance comparison
-feature_imp_df = pd.DataFrame({
-    'Feature': X.columns,
-    'Logistic Regression': np.abs(log_reg.coef_[0]),
-    'Decision Tree': dt.feature_importances_,
-    'Random Forest': rf.feature_importances_
+# -----------------------------------------------------------------------------
+# FIGURE 4: ROC Curves
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(9, 7))
+
+model_colors = [COLORS['dark_blue'], COLORS['dark_green'], COLORS['muted_teal']]
+for (name, res), color in zip(results.items(), model_colors):
+    fpr, tpr, _ = roc_curve(y_test, res['y_prob'])
+    roc_auc = auc(fpr, tpr)
+    ax.plot(fpr, tpr, color=color, lw=2.5, label=f'{name} (AUC = {roc_auc:.3f})')
+
+ax.plot([0, 1], [0, 1], color=COLORS['slate'], linestyle='--', lw=1.5, alpha=0.5)
+ax.set_xlim([0.0, 1.0])
+ax.set_ylim([0.0, 1.05])
+ax.set_xlabel('False Positive Rate', fontsize=12, color=COLORS['slate'])
+ax.set_ylabel('True Positive Rate', fontsize=12, color=COLORS['slate'])
+ax.set_title('ROC Curve Comparison', fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.legend(loc='lower right', fontsize=11, frameon=True, facecolor='white', edgecolor=COLORS['light_blue'])
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
+ax.set_facecolor('#f8fafa')
+
+plt.tight_layout()
+plt.savefig('04_roc_curves.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
+
+# -----------------------------------------------------------------------------
+# FIGURE 5: Precision-Recall Curves
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(9, 7))
+
+for (name, res), color in zip(results.items(), model_colors):
+    precision, recall, _ = precision_recall_curve(y_test, res['y_prob'])
+    ap = average_precision_score(y_test, res['y_prob'])
+    ax.plot(recall, precision, color=color, lw=2.5, label=f'{name} (AP = {ap:.3f})')
+
+no_skill = len(y_test[y_test==1]) / len(y_test)
+ax.axhline(y=no_skill, color=COLORS['slate'], linestyle='--', lw=1.5, alpha=0.5, label=f'Baseline ({no_skill:.2f})')
+
+ax.set_xlabel('Recall', fontsize=12, color=COLORS['slate'])
+ax.set_ylabel('Precision', fontsize=12, color=COLORS['slate'])
+ax.set_title('Precision-Recall Curve Comparison', fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.legend(loc='upper right', fontsize=11, frameon=True, facecolor='white', edgecolor=COLORS['light_blue'])
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
+ax.set_facecolor('#f8fafa')
+
+plt.tight_layout()
+plt.savefig('05_precision_recall_curves.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
+
+# -----------------------------------------------------------------------------
+# FIGURE 6: Confusion Matrices
+# -----------------------------------------------------------------------------
+fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+
+for ax, (name, res), color in zip(axes, results.items(), model_colors):
+    cm = confusion_matrix(y_test, res['y_pred'])
+    
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax,
+                xticklabels=['No', 'Yes'], yticklabels=['No', 'Yes'],
+                annot_kws={'size': 14, 'fontweight': 'bold'},
+                cbar=False, linewidths=2, linecolor='white')
+    
+    ax.set_xlabel('Predicted', fontsize=11, color=COLORS['slate'])
+    ax.set_ylabel('Actual', fontsize=11, color=COLORS['slate'])
+    ax.set_title(f'{name}\nAccuracy: {res["accuracy"]:.1%}  |  F1: {res["f1"]:.3f}', 
+                 fontsize=11, fontweight='bold', color=COLORS['dark_blue'])
+    ax.tick_params(colors=COLORS['slate'])
+
+plt.suptitle('Confusion Matrices', fontsize=14, fontweight='bold', color=COLORS['dark_blue'], y=1.02)
+plt.tight_layout()
+plt.savefig('06_confusion_matrices.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
+
+# -----------------------------------------------------------------------------
+# FIGURE 7: Key Feature Impact (Loan & Balance Only)
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(9, 5))
+
+# Get Random Forest importance for key features
+rf_model = results['Random Forest']['model']
+importance_df = pd.DataFrame({
+    'feature': feature_cols,
+    'importance': rf_model.feature_importances_
 })
-feature_imp_df_melted = feature_imp_df.melt(id_vars='Feature', var_name='Model', value_name='Importance')
-feature_labels = {'housing_binary': 'Housing Loan', 'loan_binary': 'Personal Loan', 'balance': 'Balance'}
-feature_imp_df_melted['Feature'] = feature_imp_df_melted['Feature'].map(feature_labels)
 
-x_pos = np.arange(len(feature_labels))
+key_features = importance_df[importance_df['feature'].isin(['balance', 'housing_encoded', 'loan_encoded'])]
+key_features = key_features.copy()
+key_features['label'] = key_features['feature'].map({
+    'balance': 'Account Balance',
+    'housing_encoded': 'Housing Loan',
+    'loan_encoded': 'Personal Loan'
+})
+key_features = key_features.sort_values('importance', ascending=True)
+
+bars = ax.barh(key_features['label'], key_features['importance'], 
+               color=[COLORS['dark_green'], COLORS['medium_blue'], COLORS['dark_blue']],
+               edgecolor='white', linewidth=1.5, height=0.6)
+
+for bar, imp in zip(bars, key_features['importance']):
+    ax.text(bar.get_width() + 0.002, bar.get_y() + bar.get_height()/2, 
+            f'{imp:.3f}', va='center', fontsize=12, fontweight='bold', color=COLORS['slate'])
+
+ax.set_xlabel('Feature Importance (Random Forest)', fontsize=12, color=COLORS['slate'])
+ax.set_title('Impact of Loans & Balance on Subscription Prediction', 
+             fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.set_xlim(0, max(key_features['importance']) * 1.25)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
+
+plt.tight_layout()
+plt.savefig('07_key_feature_importance.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
+
+# -----------------------------------------------------------------------------
+# FIGURE 8: Decision Tree (Simplified)
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(16, 8))
+
+dt_model = results['Decision Tree']['model']
+feature_labels = ['Age', 'Balance', 'Duration', 'Campaign', 'Pdays', 'Previous',
+                  'Housing Loan', 'Personal Loan', 'Job', 'Marital', 
+                  'Education', 'Contact', 'Month', 'Prev Outcome']
+
+plot_tree(dt_model, feature_names=feature_labels, class_names=['No', 'Yes'],
+          filled=True, rounded=True, ax=ax, fontsize=9, max_depth=3,
+          proportion=True, impurity=False)
+ax.set_title('Decision Tree: How the Model Makes Predictions (Top 3 Levels)', 
+             fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+
+plt.tight_layout()
+plt.savefig('08_decision_tree.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
+
+# -----------------------------------------------------------------------------
+# FIGURE 9: Model Performance Summary
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(10, 6))
+
+metrics = ['Accuracy', 'Precision', 'Recall', 'F1 Score']
+x = np.arange(len(metrics))
 width = 0.25
-models = feature_imp_df_melted['Model'].unique()
-for i, model in enumerate(models):
-    model_data = feature_imp_df_melted[feature_imp_df_melted['Model'] == model]
-    axes[1, 1].bar(x_pos + i*width, model_data['Importance'], width, label=model, alpha=0.8)
 
-axes[1, 1].set_xlabel('Features', fontsize=12, fontweight='bold')
-axes[1, 1].set_ylabel('Importance (Normalized)', fontsize=12, fontweight='bold')
-axes[1, 1].set_title('Feature Importance Comparison Across Models', fontsize=14, fontweight='bold', pad=20)
-axes[1, 1].set_xticks(x_pos + width)
-axes[1, 1].set_xticklabels(feature_labels.values())
-axes[1, 1].legend()
+for i, ((name, res), color) in enumerate(zip(results.items(), model_colors)):
+    values = [res['accuracy'], res['precision'], res['recall'], res['f1']]
+    bars = ax.bar(x + i*width, values, width, label=name, color=color, 
+                  edgecolor='white', linewidth=1)
 
-plt.tight_layout()
-plt.savefig('loan_analysis_overview.png', dpi=300, bbox_inches='tight')
-print("✓ Saved: loan_analysis_overview.png")
-plt.show()
+ax.set_ylabel('Score', fontsize=12, color=COLORS['slate'])
+ax.set_title('Model Performance Comparison', fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.set_xticks(x + width)
+ax.set_xticklabels(metrics, fontsize=11)
+ax.legend(frameon=True, facecolor='white', edgecolor=COLORS['light_blue'])
+ax.set_ylim(0, 1.0)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
 
-# Figure 2: ROC Curves
-fig, ax = plt.subplots(figsize=(10, 8))
-
-fpr_log, tpr_log, _ = roc_curve(y_test, y_pred_proba_log)
-fpr_dt, tpr_dt, _ = roc_curve(y_test, y_pred_proba_dt)
-fpr_rf, tpr_rf, _ = roc_curve(y_test, y_pred_proba_rf)
-
-ax.plot(fpr_log, tpr_log, label=f'Logistic Regression (AUC = {roc_auc_score(y_test, y_pred_proba_log):.3f})', linewidth=2)
-ax.plot(fpr_dt, tpr_dt, label=f'Decision Tree (AUC = {roc_auc_score(y_test, y_pred_proba_dt):.3f})', linewidth=2)
-ax.plot(fpr_rf, tpr_rf, label=f'Random Forest (AUC = {roc_auc_score(y_test, y_pred_proba_rf):.3f})', linewidth=2)
-ax.plot([0, 1], [0, 1], 'k--', label='Random Classifier', linewidth=2)
-
-ax.set_xlabel('False Positive Rate', fontsize=12, fontweight='bold')
-ax.set_ylabel('True Positive Rate', fontsize=12, fontweight='bold')
-ax.set_title('ROC Curves: Model Comparison', fontsize=14, fontweight='bold', pad=20)
-ax.legend(loc='lower right', fontsize=11)
-ax.grid(True, alpha=0.3)
+# Add value labels
+for i, (name, res) in enumerate(results.items()):
+    values = [res['accuracy'], res['precision'], res['recall'], res['f1']]
+    for j, val in enumerate(values):
+        ax.text(x[j] + i*width, val + 0.02, f'{val:.2f}', ha='center', fontsize=8, color=COLORS['slate'])
 
 plt.tight_layout()
-plt.savefig('roc_curves.png', dpi=300, bbox_inches='tight')
-print("✓ Saved: roc_curves.png")
-plt.show()
+plt.savefig('09_model_comparison.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
 
-# Figure 3: Confusion matrices
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+# -----------------------------------------------------------------------------
+# FIGURE 10: Cross-Validation Stability
+# -----------------------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(9, 6))
 
-models_cm = [
-    ('Logistic Regression', y_pred_log),
-    ('Decision Tree', y_pred_dt),
-    ('Random Forest', y_pred_rf)
-]
+cv_data = []
+cv_labels = []
+for name, model in models.items():
+    if name == 'Logistic Regression':
+        scores = cross_val_score(model, X_train_scaled, y_train_smote, cv=5, scoring='f1')
+    else:
+        scores = cross_val_score(model, X_train_smote, y_train_smote, cv=5, scoring='f1')
+    cv_data.append(scores)
+    cv_labels.append(name)
 
-for idx, (name, y_pred) in enumerate(models_cm):
-    cm = confusion_matrix(y_test, y_pred)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[idx], 
-                xticklabels=['No', 'Yes'], yticklabels=['No', 'Yes'])
-    axes[idx].set_title(f'{name}\nConfusion Matrix', fontsize=12, fontweight='bold')
-    axes[idx].set_ylabel('Actual', fontsize=11, fontweight='bold')
-    axes[idx].set_xlabel('Predicted', fontsize=11, fontweight='bold')
+bp = ax.boxplot(cv_data, labels=cv_labels, patch_artist=True, widths=0.5)
 
-plt.tight_layout()
-plt.savefig('confusion_matrices.png', dpi=300, bbox_inches='tight')
-print("✓ Saved: confusion_matrices.png")
-plt.show()
+for patch, color in zip(bp['boxes'], model_colors):
+    patch.set_facecolor(color)
+    patch.set_alpha(0.8)
+for median in bp['medians']:
+    median.set_color('white')
+    median.set_linewidth(2)
 
-# Figure 4: Interaction effects
-fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+# Add individual points
+for i, scores in enumerate(cv_data, 1):
+    ax.scatter([i]*len(scores), scores, color='white', s=40, zorder=5, edgecolor=COLORS['slate'], linewidth=1)
 
-# Housing loan effect by balance quartile
-df['balance_quartile'] = pd.qcut(df['balance'], 4, labels=['Q1 (Lowest)', 'Q2', 'Q3', 'Q4 (Highest)'])
-housing_balance = df.groupby(['balance_quartile', 'housing'])['y'].apply(lambda x: (x=='yes').sum()/len(x)*100).unstack()
-housing_balance.plot(kind='bar', ax=axes[0, 0], color=['#2ecc71', '#e74c3c'])
-axes[0, 0].set_title('Housing Loan Effect Across Balance Quartiles', fontsize=13, fontweight='bold', pad=15)
-axes[0, 0].set_xlabel('Balance Quartile', fontsize=11, fontweight='bold')
-axes[0, 0].set_ylabel('Subscription Rate (%)', fontsize=11, fontweight='bold')
-axes[0, 0].legend(title='Housing Loan', labels=['No', 'Yes'])
-axes[0, 0].set_xticklabels(axes[0, 0].get_xticklabels(), rotation=45, ha='right')
-
-# Personal loan effect by balance quartile
-personal_balance = df.groupby(['balance_quartile', 'loan'])['y'].apply(lambda x: (x=='yes').sum()/len(x)*100).unstack()
-personal_balance.plot(kind='bar', ax=axes[0, 1], color=['#3498db', '#f39c12'])
-axes[0, 1].set_title('Personal Loan Effect Across Balance Quartiles', fontsize=13, fontweight='bold', pad=15)
-axes[0, 1].set_xlabel('Balance Quartile', fontsize=11, fontweight='bold')
-axes[0, 1].set_ylabel('Subscription Rate (%)', fontsize=11, fontweight='bold')
-axes[0, 1].legend(title='Personal Loan', labels=['No', 'Yes'])
-axes[0, 1].set_xticklabels(axes[0, 1].get_xticklabels(), rotation=45, ha='right')
-
-# Combined loan effect
-loan_combo = df.groupby(['housing', 'loan'])['y'].apply(lambda x: (x=='yes').sum()/len(x)*100)
-loan_combo_df = loan_combo.reset_index()
-loan_combo_df['combo'] = loan_combo_df['housing'] + ' / ' + loan_combo_df['loan']
-loan_combo_df.columns = ['housing', 'loan', 'rate', 'combo']
-loan_combo_df = loan_combo_df.sort_values('rate', ascending=False)
-
-axes[1, 0].barh(loan_combo_df['combo'], loan_combo_df['rate'], 
-                color=sns.color_palette("coolwarm", len(loan_combo_df)))
-axes[1, 0].set_xlabel('Subscription Rate (%)', fontsize=11, fontweight='bold')
-axes[1, 0].set_title('Subscription Rate by Loan Combination\n(Housing / Personal)', 
-                     fontsize=13, fontweight='bold', pad=15)
-for i, v in enumerate(loan_combo_df['rate'].values):
-    axes[1, 0].text(v + 0.3, i, f'{v:.2f}%', va='center', fontweight='bold')
-
-# Balance vs Subscription scatter
-sample_df = df.sample(min(1000, len(df)), random_state=42)
-colors_scatter = ['#e74c3c' if y == 'yes' else '#3498db' for y in sample_df['y']]
-axes[1, 1].scatter(sample_df['balance'], sample_df.index, c=colors_scatter, alpha=0.5, s=20)
-axes[1, 1].axvline(x=df[df['y']=='yes']['balance'].mean(), color='#e74c3c', 
-                   linestyle='--', linewidth=2, label=f'Avg (Subscribed): €{df[df["y"]=="yes"]["balance"].mean():.0f}')
-axes[1, 1].axvline(x=df[df['y']=='no']['balance'].mean(), color='#3498db', 
-                   linestyle='--', linewidth=2, label=f'Avg (Not Subscribed): €{df[df["y"]=="no"]["balance"].mean():.0f}')
-axes[1, 1].set_xlabel('Balance (€)', fontsize=11, fontweight='bold')
-axes[1, 1].set_title('Balance Distribution by Subscription Status\n(Sample of 1000)', 
-                     fontsize=13, fontweight='bold', pad=15)
-axes[1, 1].legend()
-axes[1, 1].set_ylabel('Sample Index', fontsize=11, fontweight='bold')
+ax.set_ylabel('F1 Score', fontsize=12, color=COLORS['slate'])
+ax.set_title('5-Fold Cross-Validation: Model Stability', 
+             fontsize=14, fontweight='bold', color=COLORS['dark_blue'], pad=15)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.tick_params(colors=COLORS['slate'])
 
 plt.tight_layout()
-plt.savefig('interaction_effects.png', dpi=300, bbox_inches='tight')
-print("✓ Saved: interaction_effects.png")
-plt.show()
+plt.savefig('10_cross_validation.png', dpi=150, bbox_inches='tight', facecolor='white')
+plt.close()
